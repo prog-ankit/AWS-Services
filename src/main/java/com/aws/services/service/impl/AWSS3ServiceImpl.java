@@ -1,10 +1,12 @@
 package com.aws.services.service.impl;
 
+import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.aws.services.config.ApplicationProperties;
 import com.aws.services.service.AWSS3Service;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -46,6 +48,9 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 				.build();
 	}
 
+	/**
+	 * List all the buckets from S3.
+	 */
 	@Override
 	public void listS3Buckets() {
 		try {
@@ -66,13 +71,37 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 	 */
 	@Override
 	public void uploadFile(String s3Path, String localPath) {
-		PutObjectRequest putObjectRequest = PutObjectRequest.builder()
-				.bucket(applicationProperties.getS3Bucket())
-				.key(s3Path)
-				.build();
-		s3Client.putObject(putObjectRequest,RequestBody.fromFile(Paths.get(localPath)));
-		LOGGER.info("File Uploaded Success.");
+		try {
+			Path path = Paths.get(localPath);
+			if (!Files.exists(path)) {
+				LOGGER.error("Local file does not exist at path: {}", localPath);
+				return;
+			}
+
+			long fileSize = Files.size(path);
+			LOGGER.info("Uploading file of size: {} bytes", fileSize);
+			String fileName = path.getFileName().toString();
+			if(s3Path.endsWith("/")) {
+				s3Path +=fileName;
+			} else {
+				s3Path += "/" + fileName;
+			}
+			PutObjectRequest putObjectRequest = PutObjectRequest.builder()
+					.bucket(applicationProperties.getS3Bucket())
+					.key(s3Path)
+					.build();
+
+			PutObjectResponse putObjectResponse = s3Client.putObject(putObjectRequest, RequestBody.fromFile(path));
+
+			LOGGER.info("File Uploaded Success. ETag: {}", putObjectResponse.eTag());
+
+		} catch (S3Exception e) {
+			LOGGER.error("Failed to upload file to S3. Error: {}", e.awsErrorDetails().errorMessage());
+		} catch (Exception e) {
+			LOGGER.error("Unexpected error occurred during file upload: {}", e.getMessage());
+		}
 	}
+
 
 	/**
 	 * Sends a message asynchronously to the specified AWS SQS queue.
@@ -82,6 +111,13 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 	 */
 	@Override
 	public void uploadFileAsync(String s3Path, String localPath) {
+		Path path = Paths.get(localPath);
+		String fileName = path.getFileName().toString();
+		if(s3Path.endsWith("/")) {
+			s3Path +=fileName;
+		} else {
+			s3Path += "/" + fileName;
+		}
 		PutObjectRequest putObjectRequest = PutObjectRequest.builder()
 				.bucket(applicationProperties.getS3Bucket())
 				.key(s3Path)
@@ -90,7 +126,7 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 		if(response.isDone()) {
 			try {
 				LOGGER.info(response.get().eTag());
-			} catch (InterruptedException | ExecutionException e) {
+			} catch (S3Exception | ExecutionException | InterruptedException e) {
 				throw new RuntimeException(e);
 			}
 		}
@@ -107,7 +143,6 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 	@Override
 	public void uploadData(String s3Path, String fileName, String fileExtension, String data) {
 		if (null != data) {
-
 			try {
 				Path tempFile  = Files.createTempFile(fileName, fileExtension);
 				Files.write(tempFile, data.getBytes());
@@ -121,7 +156,6 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 			}
 		}
 	}
-
 
 	/**
 	 * Downloads a file from the specified bucket
@@ -143,30 +177,30 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 				.build();
 		FileDownload downloadFile = s3TransferManager.downloadFile(downloadFileRequest);
 		CompletedFileDownload downloadResult = downloadFile.completionFuture().join();
-		LOGGER.info("File {} Downloaded in {}",fileName,destinationPath);
+		LOGGER.info("File {} Downloaded in {} and tag: {}",fileName,destinationPath, downloadResult.response().eTag());
 	}
 
 	/**
-	 *
-	 * @param sourceBucket The bucket name from which you want to copy objects
-	 * @param sourceKey The s3 path of the object you want to copy.
-	 * @param destinationBucket The bucket name where you want to paste objects.
-	 * @param destinationKey The s3 path where you want to paste objects.
+	 * Get the metadata of the s3 path's object.
+	 * @param key Specifies the s3 path of the object whose metadata is to be found.
+	 * @return Metadata of the object whether the request is succeed or failed.
 	 */
 	@Override
-	public void copyObjects(String sourceBucket, String sourceKey, String destinationBucket, String destinationKey) {
-		CopyObjectRequest copyObjectRequest = CopyObjectRequest.builder()
-				.sourceBucket(sourceBucket)
-				.sourceKey(sourceKey)
-				.destinationBucket(destinationBucket)
-				.destinationKey(destinationKey)
-				.build();
-		CopyRequest copyRequest = CopyRequest.builder()
-				.copyObjectRequest(copyObjectRequest)
-				.build();
-		s3TransferManager.copy(copyRequest);
-
-		LOGGER.info("Copy Operation Finished from {} to {}.",sourceBucket,destinationBucket);
+	public ResponseEntity<Map<String, HeadObjectResponse>> getObjectMetadata(String key) {
+		Map<String, HeadObjectResponse> response = new HashMap<>();
+		try {
+			HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
+					.bucket(applicationProperties.getS3Bucket())
+					.key(key)
+					.build();
+			HeadObjectResponse headObject = s3Client.headObject(headObjectRequest);
+			LOGGER.info("Successfully retrieved {}/{} of type {}", applicationProperties.getS3Bucket(),key,headObject.contentType());
+			response.put("Success",headObject);
+			return ResponseEntity.ok(response);
+		} catch (NoSuchKeyException e) {
+			response.put("Invalid Key",null);
+			return ResponseEntity.status(404).body(response);
+		}
 	}
 
 	/**
@@ -200,6 +234,9 @@ public class AWSS3ServiceImpl implements AWSS3Service {
 				}
 				response.put("false",s3ObjectsInPath);
 			} else {
+				if(!destinationPath.endsWith("/")) {
+					destinationPath += "/";
+				}
 				for (S3Object s3Object : s3Objects) {
 					downloadFile(s3Object.key(),destinationPath,s3Object.key().replace(prefix,""));
 				}
