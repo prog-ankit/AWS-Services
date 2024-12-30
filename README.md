@@ -15,7 +15,7 @@ This project demonstrates the integration of AWS S3 and AWS SQS services with Ja
 
 
 ### **S3 Operations**
-- **Li7st S3 buckets:**
+- **List S3 buckets:**
 - **Upload a file:**
 - **Asynchronous file upload:**
 - **Upload data to S3:**
